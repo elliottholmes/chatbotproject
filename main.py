@@ -1,4 +1,3 @@
-import train
-import predict
+import chatbot
 
-predict.run()
+chatbot.run()
