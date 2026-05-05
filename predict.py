@@ -3,10 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-WINDOW      = 5
-TEMPERATURE = 2.0
-MAX_GOALS   = 10
-OUTCOME     = ["Home Win", "Draw", "Away Win"]
+TEMPERATURE  = 2.0
+MAX_GOALS    = 10
+OUTCOME      = ["Home Win", "Draw", "Away Win"]
 
 # ── Model definition (must match train.py) ────────────────────────────────────
 class PoissonMatchPredictor(nn.Module):
@@ -33,19 +32,53 @@ class PoissonMatchPredictor(nn.Module):
         return torch.exp(log_lambdas)
 
 # ── Load saved model ───────────────────────────────────────────────────────────
-checkpoint   = torch.load("model.pt", weights_only=False)
-team_le      = checkpoint["team_le"]
-team_history = checkpoint["team_history"]
-title_to_id  = checkpoint["title_to_id"]
-num_teams    = checkpoint["num_teams"]
-embed_dim    = checkpoint["embed_dim"]
-feat_dim     = checkpoint["feat_dim"]
+checkpoint    = torch.load("model.pt", weights_only=False)
+team_le       = checkpoint["team_le"]
+team_history  = checkpoint["team_history"]
+title_to_id   = checkpoint["title_to_id"]
+num_teams     = checkpoint["num_teams"]
+embed_dim     = checkpoint["embed_dim"]
+feat_dim      = checkpoint["feat_dim"]
+DECAY_RATE    = checkpoint["decay_rate"]
+RECENT_BOOST  = checkpoint["recent_boost"]
+LEAGUE_AVG_G  = checkpoint["league_avg_g"]
 
 model = PoissonMatchPredictor(num_teams, embed_dim, feat_dim)
 model.load_state_dict(checkpoint["model_state"])
 model.eval()
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Feature computation (mirrors train.py) ─────────────────────────────────────
+def compute_features(tid):
+    hist = list(team_history.get(tid, []))
+    if not hist:
+        return [0.0] * 8
+
+    n = len(hist)
+    raw_w = []
+    for i in range(n):
+        age = n - 1 - i
+        w   = math.exp(-DECAY_RATE * age)
+        if age < 5:
+            w *= RECENT_BOOST
+        raw_w.append(w)
+    total_w = sum(raw_w)
+    weights = [w / total_w for w in raw_w]
+
+    opp_att = [h["opp_att"] for h in hist]
+    opp_def = [h["opp_def"] for h in hist]
+
+    adj_gf  = sum(w * h["gf"]  * (oa / LEAGUE_AVG_G) for w, h, oa in zip(weights, hist, opp_def))
+    adj_ga  = sum(w * h["ga"]  * (LEAGUE_AVG_G / max(oa, 0.1)) for w, h, oa in zip(weights, hist, opp_att))
+    adj_xgf = sum(w * h["xgf"] * (oa / LEAGUE_AVG_G) for w, h, oa in zip(weights, hist, opp_def))
+    adj_xga = sum(w * h["xga"] * (LEAGUE_AVG_G / max(oa, 0.1)) for w, h, oa in zip(weights, hist, opp_att))
+    wr      = sum(w * h["won"]  for w, h in zip(weights, hist))
+    dr      = sum(w * h["drew"] for w, h in zip(weights, hist))
+    avg_opp_att = sum(w * oa for w, oa in zip(weights, opp_att))
+    avg_opp_def = sum(w * od for w, od in zip(weights, opp_def))
+
+    return [adj_gf, adj_ga, adj_xgf, adj_xga, wr, dr, avg_opp_att, avg_opp_def]
+
+# ── Poisson helpers ────────────────────────────────────────────────────────────
 def poisson_pmf(lam, k):
     return math.exp(-lam) * (lam ** k) / math.factorial(k)
 
@@ -56,55 +89,32 @@ def outcome_probs(lam_h, lam_a, temperature=TEMPERATURE):
         for a in range(MAX_GOALS + 1):
             pa = poisson_pmf(lam_a, a)
             p  = ph * pa
-            if h > a:
-                p_hw   += p
-            elif h == a:
-                p_draw += p
-            else:
-                p_aw   += p
+            if   h > a:  p_hw   += p
+            elif h == a: p_draw += p
+            else:        p_aw   += p
     log_probs = np.array([
         math.log(max(p_hw,   1e-12)),
         math.log(max(p_draw, 1e-12)),
         math.log(max(p_aw,   1e-12)),
     ])
-    scaled = log_probs / temperature
+    scaled  = log_probs / temperature
     scaled -= scaled.max()
     probs   = np.exp(scaled)
     probs  /= probs.sum()
     return probs.tolist()
-
-def get_stats(tid):
-    hist = list(team_history.get(tid, []))[-WINDOW:]
-    if not hist:
-        return [0.0] * 6
-    return [
-        np.mean([h["gf"]  for h in hist]),
-        np.mean([h["ga"]  for h in hist]),
-        np.mean([h["xgf"] for h in hist]),
-        np.mean([h["xga"] for h in hist]),
-        np.mean([h["won"] for h in hist]),
-        np.mean([h["drew"] for h in hist]),
-    ]
-
-def list_teams():
-    teams = sorted(title_to_id.keys())
-    print("\nAvailable teams:")
-    for i, t in enumerate(teams, 1):
-        print(f"  {i:2d}. {t.title()}")
-    print()
 
 # ── Predict ────────────────────────────────────────────────────────────────────
 def predict(home, away):
     hid = title_to_id.get(home.lower())
     aid = title_to_id.get(away.lower())
     if not hid:
-        print(f"  Team not found: '{home}'. Run list_teams() to see options.")
+        print(f"  Team not found: '{home}'. Type 'teams' to see options.")
         return
     if not aid:
-        print(f"  Team not found: '{away}'. Run list_teams() to see options.")
+        print(f"  Team not found: '{away}'. Type 'teams' to see options.")
         return
 
-    feat  = get_stats(hid) + get_stats(aid) + [1/3, 1/3, 1/3]
+    feat  = compute_features(hid) + compute_features(aid) + [1/3, 1/3, 1/3]
     h_enc = int(team_le.transform([hid])[0])
     a_enc = int(team_le.transform([aid])[0])
 
@@ -129,6 +139,12 @@ def predict(home, away):
     print(f"\n  Prediction: {OUTCOME[int(np.argmax(probs))]}")
     print(f"{'='*52}\n")
     return probs
+
+def list_teams():
+    print("\nAvailable teams:")
+    for i, t in enumerate(sorted(title_to_id.keys()), 1):
+        print(f"  {i:2d}. {t.title()}")
+    print()
 
 # ── Interactive prompt ─────────────────────────────────────────────────────────
 def run():
