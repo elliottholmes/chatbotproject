@@ -131,7 +131,7 @@ def predict(home, away):
     return probs
 
 # ── Interactive prompt ─────────────────────────────────────────────────────────
-if __name__ == "__main__":
+def run():
     print("Match Predictor — model loaded.")
     print("Type 'teams' to list all available teams, or 'quit' to exit.\n")
 
@@ -149,3 +149,6 @@ if __name__ == "__main__":
             predict(home, away)
         except (KeyboardInterrupt, EOFError):
             break
+
+if __name__ == "__main__":
+    run()
