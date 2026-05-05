@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-TEMPERATURE = 2.0
+TEMPERATURE = 1.5
 MAX_GOALS   = 10
 OUTCOME     = ["Home Win", "Draw", "Away Win"]
 
