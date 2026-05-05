@@ -3,9 +3,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-TEMPERATURE  = 1.5
-MAX_GOALS    = 10
-OUTCOME      = ["Home Win", "Draw", "Away Win"]
+TEMPERATURE = 2.0
+MAX_GOALS   = 10
+OUTCOME     = ["Home Win", "Draw", "Away Win"]
 
 # ── Model definition (must match train.py) ────────────────────────────────────
 class PoissonMatchPredictor(nn.Module):
@@ -32,16 +32,17 @@ class PoissonMatchPredictor(nn.Module):
         return torch.exp(log_lambdas)
 
 # ── Load saved model ───────────────────────────────────────────────────────────
-checkpoint    = torch.load("model.pt", weights_only=False)
-team_le       = checkpoint["team_le"]
-team_history  = checkpoint["team_history"]
-title_to_id   = checkpoint["title_to_id"]
-num_teams     = checkpoint["num_teams"]
-embed_dim     = checkpoint["embed_dim"]
-feat_dim      = checkpoint["feat_dim"]
-DECAY_RATE    = checkpoint["decay_rate"]
-RECENT_BOOST  = checkpoint["recent_boost"]
-LEAGUE_AVG_G  = checkpoint["league_avg_g"]
+checkpoint   = torch.load("model.pt", weights_only=False)
+team_le      = checkpoint["team_le"]
+team_history = checkpoint["team_history"]
+final_table  = checkpoint["final_table"]
+title_to_id  = checkpoint["title_to_id"]
+num_teams    = checkpoint["num_teams"]
+embed_dim    = checkpoint["embed_dim"]
+feat_dim     = checkpoint["feat_dim"]
+DECAY_RATE   = checkpoint["decay_rate"]
+RECENT_BOOST = checkpoint["recent_boost"]
+LEAGUE_AVG_G = checkpoint["league_avg_g"]
 
 model = PoissonMatchPredictor(num_teams, embed_dim, feat_dim)
 model.load_state_dict(checkpoint["model_state"])
@@ -50,8 +51,20 @@ model.eval()
 # ── Feature computation (mirrors train.py) ─────────────────────────────────────
 def compute_features(tid):
     hist = list(team_history.get(tid, []))
+    t    = final_table.get(tid, {"pts": 0, "gd": 0, "gp": 0})
+    gp   = max(t["gp"], 1)
+    pts_pg = t["pts"] / gp
+    gd_pg  = t["gd"]  / gp
+
+    all_pts  = [(final_table[t2]["pts"], final_table[t2]["gd"])
+                for t2 in final_table if final_table[t2]["gp"] > 0]
+    my_score = (t["pts"], t["gd"])
+    rank     = sum(1 for s in all_pts if s > my_score)
+    pos_norm = 1.0 - rank / max(len(all_pts) - 1, 1)
+    table_feats = [pts_pg, gd_pg, pos_norm]
+
     if not hist:
-        return [0.0] * 8
+        return [0.0] * 8 + table_feats
 
     n = len(hist)
     raw_w = []
@@ -76,7 +89,8 @@ def compute_features(tid):
     avg_opp_att = sum(w * oa for w, oa in zip(weights, opp_att))
     avg_opp_def = sum(w * od for w, od in zip(weights, opp_def))
 
-    return [adj_gf, adj_ga, adj_xgf, adj_xga, wr, dr, avg_opp_att, avg_opp_def]
+    return [adj_gf, adj_ga, adj_xgf, adj_xga, wr, dr,
+            avg_opp_att, avg_opp_def] + table_feats
 
 # ── Poisson helpers ────────────────────────────────────────────────────────────
 def poisson_pmf(lam, k):

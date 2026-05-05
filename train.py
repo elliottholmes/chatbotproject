@@ -39,55 +39,68 @@ for m in matches:
     title_to_id[m["a"]["title"].lower()] = m["a"]["id"]
 
 # ── Feature engineering ────────────────────────────────────────────────────────
-# Per-team running totals used to estimate opponent quality at time of each match
-# { team_id: { "gf": total, "ga": total, "n": count } }
 def make_dataset(matches):
-    team_history     = defaultdict(list)   # full match-by-match log
-    team_running     = defaultdict(lambda: {"gf": 0.0, "ga": 0.0, "n": 0})
+    team_history = defaultdict(list)
+    team_running = defaultdict(lambda: {"gf": 0.0, "ga": 0.0, "n": 0})
+
+    # Running league table: points, goal difference, games played
+    table = defaultdict(lambda: {"pts": 0, "gd": 0, "gp": 0})
 
     def opp_quality(opp_id):
-        """
-        Returns (attack_strength, defense_strength) for an opponent
-        based on their season stats so far.
-        attack_strength  = avg goals scored  (higher = tougher to defend against)
-        defense_strength = avg goals conceded (higher = easier to score against)
-        """
         s = team_running[opp_id]
         if s["n"] == 0:
             return LEAGUE_AVG_G, LEAGUE_AVG_G
         return s["gf"] / s["n"], s["ga"] / s["n"]
 
+    def league_table_features(tid):
+        """
+        Returns points per game, goal difference per game, and
+        normalised league position (1.0 = top, 0.0 = bottom).
+        All computed from the running table BEFORE this match.
+        """
+        t = table[tid]
+        gp = max(t["gp"], 1)
+        pts_pg = t["pts"] / gp
+        gd_pg  = t["gd"]  / gp
+
+        # Rank all teams that have played at least once
+        all_pts = [(table[tid2]["pts"], table[tid2]["gd"])
+                   for tid2 in table if table[tid2]["gp"] > 0]
+        if len(all_pts) < 2:
+            pos_norm = 0.5
+        else:
+            my_score = (t["pts"], t["gd"])
+            rank = sum(1 for s in all_pts if s > my_score)   # 0 = top
+            pos_norm = 1.0 - rank / (len(all_pts) - 1)       # 1 = best
+
+        return [pts_pg, gd_pg, pos_norm]
+
     def compute_features(tid):
         """
-        Compute 8 features for a team using ALL their season history,
-        with exponential decay weighting (older = less weight) and
-        an extra boost on the most recent 5 matches.
-        Each match's stats are adjusted by the quality of the opponent faced.
+        11 features per team:
+          8 decay-weighted, quality-adjusted form features
+        + 3 league table features (points/game, GD/game, position)
         """
         hist = team_history[tid]
+        table_feats = league_table_features(tid)
+
         if not hist:
-            return [0.0] * 8
+            return [0.0] * 8 + table_feats
 
         n = len(hist)
-
-        # Build decay weights
         raw_w = []
         for i in range(n):
-            age = n - 1 - i          # 0 = most recent
+            age = n - 1 - i
             w   = math.exp(-DECAY_RATE * age)
             if age < 5:
-                w *= RECENT_BOOST    # boost last 5
+                w *= RECENT_BOOST
             raw_w.append(w)
         total_w = sum(raw_w)
         weights = [w / total_w for w in raw_w]
 
-        # Opponent quality per match
         opp_att = [h["opp_att"] for h in hist]
         opp_def = [h["opp_def"] for h in hist]
 
-        # Quality-adjusted stats:
-        #   Goals scored vs strong defense → amplified (harder to score, so more impressive)
-        #   Goals conceded vs strong attack → dampened (less shameful)
         adj_gf  = sum(w * h["gf"]  * (oa / LEAGUE_AVG_G)
                       for w, h, oa in zip(weights, hist, opp_def))
         adj_ga  = sum(w * h["ga"]  * (LEAGUE_AVG_G / max(oa, 0.1))
@@ -100,11 +113,11 @@ def make_dataset(matches):
         wr  = sum(w * h["won"]  for w, h in zip(weights, hist))
         dr  = sum(w * h["drew"] for w, h in zip(weights, hist))
 
-        # Average opponent attack/defense quality faced (fixture difficulty)
         avg_opp_att = sum(w * oa for w, oa in zip(weights, opp_att))
         avg_opp_def = sum(w * od for w, od in zip(weights, opp_def))
 
-        return [adj_gf, adj_ga, adj_xgf, adj_xga, wr, dr, avg_opp_att, avg_opp_def]
+        return [adj_gf, adj_ga, adj_xgf, adj_xga, wr, dr,
+                avg_opp_att, avg_opp_def] + table_feats
 
     records = []
     for m in matches:
@@ -130,11 +143,9 @@ def make_dataset(matches):
             "agoals": agoals,
         })
 
-        # Opponent quality at the time of this match
-        h_opp_att, h_opp_def = opp_quality(aid)   # home team faced away team
-        a_opp_att, a_opp_def = opp_quality(hid)   # away team faced home team
+        h_opp_att, h_opp_def = opp_quality(aid)
+        a_opp_att, a_opp_def = opp_quality(hid)
 
-        # Update history
         team_history[hid].append({
             "gf": hgoals, "ga": agoals, "xgf": hxg, "xga": axg,
             "won": int(hgoals > agoals), "drew": int(hgoals == agoals),
@@ -146,7 +157,6 @@ def make_dataset(matches):
             "opp_att": a_opp_att, "opp_def": a_opp_def,
         })
 
-        # Update running totals for future opponent quality lookups
         team_running[hid]["gf"] += hgoals
         team_running[hid]["ga"] += agoals
         team_running[hid]["n"]  += 1
@@ -154,10 +164,16 @@ def make_dataset(matches):
         team_running[aid]["ga"] += hgoals
         team_running[aid]["n"]  += 1
 
-    return records, team_history
+        # Update league table
+        hpts = 3 if hgoals > agoals else (1 if hgoals == agoals else 0)
+        apts = 3 if agoals > hgoals else (1 if hgoals == agoals else 0)
+        table[hid]["pts"] += hpts;  table[hid]["gd"] += hgoals - agoals;  table[hid]["gp"] += 1
+        table[aid]["pts"] += apts;  table[aid]["gd"] += agoals - hgoals;  table[aid]["gp"] += 1
 
-records, team_history = make_dataset(matches)
-FEAT_DIM = len(records[0]["feat"])   # 8 + 8 + 3 = 19
+    return records, team_history, dict(table)
+
+records, team_history, final_table = make_dataset(matches)
+FEAT_DIM = len(records[0]["feat"])   # 11 + 11 + 3 = 25
 print(f"Feature dimension: {FEAT_DIM}\n")
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
@@ -223,7 +239,7 @@ def outcome_probs_from_lambdas(lam_h, lam_a, temperature=TEMPERATURE):
         for a in range(MAX_GOALS + 1):
             pa = poisson_pmf(lam_a, a)
             p  = ph * pa
-            if   h > a: p_hw   += p
+            if   h > a:  p_hw   += p
             elif h == a: p_draw += p
             else:        p_aw   += p
 
@@ -268,10 +284,11 @@ for epoch in range(1, EPOCHS + 1):
         print(f"Epoch {epoch:3d}/{EPOCHS}  loss={epoch_loss:.4f}  val_MAE={val_mae:.4f}")
 
 torch.save({
-    "model_state":  model.state_dict(),
-    "team_le":      team_le,
-    "team_history": dict(team_history),
-    "title_to_id":  title_to_id,
+    "model_state":   model.state_dict(),
+    "team_le":       team_le,
+    "team_history":  dict(team_history),
+    "final_table":   final_table,
+    "title_to_id":   title_to_id,
     "num_teams":     NUM_TEAMS,
     "embed_dim":     EMBED_DIM,
     "feat_dim":      FEAT_DIM,
@@ -284,10 +301,22 @@ print("\nModel saved to model.pt")
 # ── Prediction helper ──────────────────────────────────────────────────────────
 OUTCOME = ["Home Win", "Draw", "Away Win"]
 
-def compute_features_for_predict(tid):
+def compute_predict_features(tid):
     hist = team_history[tid]
+    t    = final_table.get(tid, {"pts": 0, "gd": 0, "gp": 0})
+    gp   = max(t["gp"], 1)
+    pts_pg = t["pts"] / gp
+    gd_pg  = t["gd"]  / gp
+    all_pts = [(final_table[t2]["pts"], final_table[t2]["gd"])
+               for t2 in final_table if final_table[t2]["gp"] > 0]
+    my_score = (t["pts"], t["gd"])
+    rank = sum(1 for s in all_pts if s > my_score)
+    pos_norm = 1.0 - rank / max(len(all_pts) - 1, 1)
+    table_feats = [pts_pg, gd_pg, pos_norm]
+
     if not hist:
-        return [0.0] * 8
+        return [0.0] * 8 + table_feats
+
     n = len(hist)
     raw_w = []
     for i in range(n):
@@ -298,8 +327,10 @@ def compute_features_for_predict(tid):
         raw_w.append(w)
     total_w = sum(raw_w)
     weights = [w / total_w for w in raw_w]
+
     opp_att = [h["opp_att"] for h in hist]
     opp_def = [h["opp_def"] for h in hist]
+
     adj_gf  = sum(w * h["gf"]  * (oa / LEAGUE_AVG_G) for w, h, oa in zip(weights, hist, opp_def))
     adj_ga  = sum(w * h["ga"]  * (LEAGUE_AVG_G / max(oa, 0.1)) for w, h, oa in zip(weights, hist, opp_att))
     adj_xgf = sum(w * h["xgf"] * (oa / LEAGUE_AVG_G) for w, h, oa in zip(weights, hist, opp_def))
@@ -308,7 +339,9 @@ def compute_features_for_predict(tid):
     dr  = sum(w * h["drew"] for w, h in zip(weights, hist))
     avg_opp_att = sum(w * oa for w, oa in zip(weights, opp_att))
     avg_opp_def = sum(w * od for w, od in zip(weights, opp_def))
-    return [adj_gf, adj_ga, adj_xgf, adj_xga, wr, dr, avg_opp_att, avg_opp_def]
+
+    return [adj_gf, adj_ga, adj_xgf, adj_xga, wr, dr,
+            avg_opp_att, avg_opp_def] + table_feats
 
 def predict_match(home_title, away_title):
     hid = title_to_id.get(home_title.lower())
@@ -318,7 +351,7 @@ def predict_match(home_title, away_title):
     if not aid:
         raise ValueError(f"Team not found: {away_title}")
 
-    feat  = compute_features_for_predict(hid) + compute_features_for_predict(aid) + [1/3, 1/3, 1/3]
+    feat  = compute_predict_features(hid) + compute_predict_features(aid) + [1/3, 1/3, 1/3]
     h_enc = int(team_le.transform([hid])[0])
     a_enc = int(team_le.transform([aid])[0])
 
@@ -347,6 +380,6 @@ def predict_match(home_title, away_title):
 
 # ── Example predictions ────────────────────────────────────────────────────────
 print("\n--- Example Predictions ---")
+predict_match("Wolverhampton Wanderers", "Arsenal")
 predict_match("Liverpool", "Arsenal")
 predict_match("Manchester City", "Chelsea")
-predict_match("Tottenham", "Aston Villa")
