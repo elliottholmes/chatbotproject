@@ -1,10 +1,11 @@
 """
 Football chatbot — fully LLM-driven responses.
 
-No hardcoded response strings anywhere. Real data (xG, probabilities,
-form, table) is injected into the prompt as grounding context, then the
-LLM writes the entire reply in natural language. The model can't
-hallucinate numbers because every fact is pinned in the prompt.
+Uses base TinyLlama-1.1B-Chat-v1.0 with NO fine-tuning.
+
+Real data (xG, probabilities, form, table) is injected into the prompt as 
+grounding context, then the LLM writes the entire reply in natural language. 
+The model can't hallucinate numbers because every fact is pinned in the prompt.
 """
 
 import os
@@ -18,10 +19,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import predict as pred
 
-MODEL_DIR = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Use base model, not fine-tuned
+MODEL_DIR = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Base model, not fine-tuned
 
-# ── Load model ────────────────────────────────────────────────────────────────
-print(f"Loading model from {MODEL_DIR}...")
+# ── Load model ──────────────────────────────────────────────────────────
+print(f"Loading base model from {MODEL_DIR}...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
@@ -92,7 +93,7 @@ def extract_teams(text):
                 return found
     return found
 
-# ── Intent detection ──────────────────────────────────────────────────────────
+# ── Intent detection ────────────────────────────────────────────────────────
 TABLE_WORDS   = ["table", "standings", "standing", "league table", "ranked", "top of", "who's top"]
 FORM_WORDS    = ["form", "recent", "how is", "how are", "doing", "results", "record",
                  "performing", "season", "last few", "run of"]
@@ -120,7 +121,7 @@ def detect_intent(text):
                              "who will", "who wins", "scoreline"]): return "predict"
     return "general"
 
-# ── Data gathering ────────────────────────────────────────────────────────────
+# ── Data gathering ─────────────────────────────────────────────────────────
 
 def get_prediction_data(home, away):
     hid = pred.title_to_id.get(home)
@@ -232,7 +233,7 @@ def get_h2h_data(home, away):
         "avg_total_goals": avg_hg,
     }
 
-# ── LLM generation ────────────────────────────────────────────────────────────
+# ── LLM generation ─────────────────────────────────────────────────────────
 
 _JUNK_RE = re.compile(
     r"https?://\S+|@\w+|#\w+|\(\s*@\w+\s*\)|pic[,\.]?\s*twitter\S*"
@@ -263,7 +264,7 @@ def clean_output(text, allowed_teams=None):
 def llm_respond(prompt, max_new_tokens=120, temperature=0.82,
                 top_p=0.91, top_k=50, allowed_teams=None):
     """
-    Feed a grounded prompt to the LLM and return clean output.
+    Feed a grounded prompt to the base LLM and return clean output.
     The prompt already contains all real numbers — the LLM writes
     the natural language around them.
     """
@@ -473,7 +474,7 @@ def general_prompt(user_input):
         f"Politely explain that and suggest asking about football instead."
     )
 
-# ── Main chat function ────────────────────────────────────────────────────────
+# ── Main chat function ───────────────────────────────────────────────────────
 
 def chat(user_input):
     intent = detect_intent(user_input)
@@ -547,10 +548,11 @@ def chat(user_input):
     else:
         return "I'm a football prediction bot. Ask me about EPL matches, team form, the league table, or how my model works!"
 
-# ── Interactive loop ──────────────────────────────────────────────────────────
+# ── Interactive loop ────────────────────────────────────────────────────────
+
 def run():
     print("=" * 60)
-    print("  EPL Football Chatbot  |  LLM-driven · Poisson grounded")
+    print("  EPL Football Chatbot  |  Base TinyLlama · Poisson grounded")
     print("  Try: predictions · form · table · h2h · btts · explain")
     print("  Type 'quit' to exit.")
     print("=" * 60)
