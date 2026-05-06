@@ -1,5 +1,6 @@
 """
 Self-contained football prediction chatbot.
+- Inference-only: no fine-tuning or training happens here
 - Detects intent from natural language
 - Fuzzy-matches team names
 - Calls the Poisson model for predictions

@@ -7,6 +7,7 @@ LLM writes the entire reply in natural language. The model can't
 hallucinate numbers because every fact is pinned in the prompt.
 """
 
+import os
 import re
 import math
 import random
@@ -17,21 +18,51 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import predict as pred
 
-MODEL_DIR = "llm_model"
+MODEL_DIR = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Use base model, not fine-tuned
 
 # ── Load model ────────────────────────────────────────────────────────────────
-print("Loading fine-tuned model...")
+print(f"Loading model from {MODEL_DIR}...")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
 tokenizer.pad_token = tokenizer.eos_token
-llm = AutoModelForCausalLM.from_pretrained(MODEL_DIR)
+llm = AutoModelForCausalLM.from_pretrained(MODEL_DIR).to(device)
 llm.eval()
-print("Model ready.\n")
+print(f"Model ready on {device}.\n")
 
 TEAMS = sorted(pred.title_to_id.keys())
+
+TEAM_ALIASES = {
+    "wolves": "wolverhampton wanderers",
+    "spurs": "tottenham hotspur",
+    "man u": "manchester united",
+    "man city": "manchester city",
+    "newcastle": "newcastle united",
+    "west ham": "west ham united",
+    "brighton": "brighton & hove albion",
+    "palace": "crystal palace",
+    "leicester": "leicester city",
+    "southampton": "southampton",
+    "norwich": "norwich city",
+    "watford": "watford",
+    "bournemouth": "afc bournemouth",
+    "cardiff": "cardiff city",
+    "fulham": "fulham",
+    "huddersfield": "huddersfield town",
+    "sheffield united": "sheffield united",
+    "liverpool": "liverpool",
+    "chelsea": "chelsea",
+    "arsenal": "arsenal",
+    "everton": "everton",
+    "burnley": "burnley",
+    "west brom": "west bromwich albion",
+}
 
 # ── Fuzzy team matching ───────────────────────────────────────────────────────
 def fuzzy_match(phrase, threshold=0.55):
     phrase = phrase.lower().strip()
+    if phrase in TEAM_ALIASES:
+        return TEAM_ALIASES[phrase]
     best, best_score = None, 0.0
     for c in TEAMS:
         score = SequenceMatcher(None, phrase, c).ratio()
@@ -237,13 +268,14 @@ def llm_respond(prompt, max_new_tokens=120, temperature=0.82,
     the natural language around them.
     """
     inputs = tokenizer(prompt, return_tensors="pt",
-                       truncation=True, max_length=512)
+                       truncation=True, max_length=512).to(device)
     input_len = inputs["input_ids"].shape[1]
 
     with torch.no_grad():
         output = llm.generate(
             inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
+            max_length=None,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
             top_p=top_p,
@@ -434,7 +466,12 @@ def teams_prompt():
     return f"### User: Which teams are available?\n### Bot: {grounding} The clubs I cover are"
 
 def general_prompt(user_input):
-    return f"### User: {user_input}\n### Bot:"
+    return (
+        f"### User: {user_input}\n"
+        f"### Bot: DATA: This query does not appear to be about football, EPL teams, matches, predictions, form, table, or methodology. "
+        f"As a specialized football prediction bot, I only provide information on those topics. "
+        f"Politely explain that and suggest asking about football instead."
+    )
 
 # ── Main chat function ────────────────────────────────────────────────────────
 
@@ -503,17 +540,12 @@ def chat(user_input):
         resp   = llm_respond(prompt, max_new_tokens=100)
         return resp or ", ".join(t.title() for t in sorted(TEAMS))
 
-    # General / off-topic — let the LLM handle it freely
-    prompt = general_prompt(user_input)
-    resp   = llm_respond(prompt, max_new_tokens=100)
-    if not resp or len(resp) < 15:
-        fallback_prompt = (
-            f"### User: {user_input}\n"
-            f"### Bot: That's an interesting question! As a football analytics bot, "
-            f"I can help most with"
-        )
-        resp = llm_respond(fallback_prompt, max_new_tokens=60)
-    return resp or "I'm a football prediction bot — ask me about EPL matches, team form, the league table, or how my model works!"
+    # General / off-topic — fixed response to avoid hallucination
+    greetings = ["hello", "hi", "hey", "good morning", "good evening", "sup", "what's up", "yo"]
+    if any(g in user_input.lower() for g in greetings):
+        return "Hi there! I'm a football prediction bot. Ask me about EPL matches, team form, the league table, or how my model works!"
+    else:
+        return "I'm a football prediction bot. Ask me about EPL matches, team form, the league table, or how my model works!"
 
 # ── Interactive loop ──────────────────────────────────────────────────────────
 def run():
