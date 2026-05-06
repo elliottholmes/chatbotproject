@@ -121,12 +121,9 @@ def outcome_probs(lam_h, lam_a, temperature=TEMPERATURE):
 def predict(home, away):
     hid = title_to_id.get(home.lower())
     aid = title_to_id.get(away.lower())
-    if not hid:
-        print(f"  Team not found: '{home}'. Type 'teams' to see options.")
-        return
-    if not aid:
-        print(f"  Team not found: '{away}'. Type 'teams' to see options.")
-        return
+
+    if not hid or not aid:
+        return None
 
     feat  = compute_features(hid) + compute_features(aid) + [1/3, 1/3, 1/3]
     h_enc = int(team_le.transform([hid])[0])
@@ -142,17 +139,65 @@ def predict(home, away):
     lam_h, lam_a = lambdas
     probs = outcome_probs(lam_h, lam_a)
 
-    print(f"\n{'='*52}")
-    print(f"  {home.title():<22} vs  {away.title()}")
-    print(f"  Expected goals:  {lam_h:.2f}  –  {lam_a:.2f}")
-    print(f"  Temperature:     {TEMPERATURE}")
-    print(f"{'='*52}")
+    return {
+        "lam_h": lam_h,
+        "lam_a": lam_a,
+        "probs": probs,
+        "prediction": OUTCOME[int(np.argmax(probs))]
+    }
+
+def predict_with_output(home, away):
+    result = predict(home, away)
+
+    if result is None:
+        return None
+
+    lam_h = result["lam_h"]
+    lam_a = result["lam_a"]
+    probs = result["probs"]
+
+    lines = []
+    lines.append("=" * 52)
+    lines.append(f"  {home.title():<22} vs  {away.title()}")
+    lines.append(f"  Expected goals:  {lam_h:.2f}  –  {lam_a:.2f}")
+    lines.append(f"  Temperature:     {TEMPERATURE}")
+    lines.append("=" * 52)
+
     for label, p in zip(OUTCOME, probs):
         bar = "█" * int(p * 30)
-        print(f"  {label:<12} {p*100:5.1f}%  {bar}")
-    print(f"\n  Prediction: {OUTCOME[int(np.argmax(probs))]}")
-    print(f"{'='*52}\n")
-    return probs
+        lines.append(f"  {label:<12} {p*100:5.1f}%  {bar}")
+
+    prediction = OUTCOME[int(np.argmax(probs))]
+    lines.append(f"\n  Prediction: {prediction}")
+    lines.append("=" * 52)
+
+    return "\n".join(lines), result
+
+def predict_with_output2(home, away):
+    result = predict(home, away)
+
+    if result is None:
+        return None
+
+    lam_h = result["lam_h"]
+    lam_a = result["lam_a"]
+    probs = result["probs"]
+
+    lines = []
+    lines.append("=" * 52)
+    lines.append(f"  {home.title():<22} vs  {away.title()}")
+    lines.append(f"  Expected goals:  {lam_h:.2f}  –  {lam_a:.2f}")
+    lines.append(f"  Temperature:     {TEMPERATURE}")
+    lines.append("=" * 52)
+
+    for label, p in zip(OUTCOME, probs):
+        bar = "█" * int(p * 30)
+        lines.append(f"  {label:<12} {p*100:5.1f}%  {bar}")
+
+    prediction = OUTCOME[int(np.argmax(probs))]
+    lines.append(f"\n  Prediction: {prediction}")
+    lines.append("=" * 52)
+    return "\n".join(lines)
 
 def list_teams():
     print("\nAvailable teams:")
@@ -176,7 +221,7 @@ def run():
             away = input("Away team: ").strip()
             if away.lower() == "quit":
                 break
-            predict(home, away)
+            print(predict_with_output2(home, away))
         except (KeyboardInterrupt, EOFError):
             break
 

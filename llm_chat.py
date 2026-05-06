@@ -3,8 +3,8 @@ Football chatbot — fully LLM-driven responses.
 
 Uses base TinyLlama-1.1B-Chat-v1.0 with NO fine-tuning.
 
-Real data (xG, probabilities, form, table) is injected into the prompt as 
-grounding context, then the LLM writes the entire reply in natural language. 
+Real data (xG, probabilities, form, table) is injected into the prompt as
+grounding context, then the LLM writes the entire reply in natural language.
 The model can't hallucinate numbers because every fact is pinned in the prompt.
 """
 
@@ -19,7 +19,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import predict as pred
 
-MODEL_DIR = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Base model, not fine-tuned
+print('Imported')
+
+MODEL_DIR = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 # ── Load model ──────────────────────────────────────────────────────────
 print(f"Loading base model from {MODEL_DIR}...")
@@ -42,22 +44,61 @@ TEAM_ALIASES = {
     "west ham": "west ham united",
     "brighton": "brighton & hove albion",
     "palace": "crystal palace",
-    "leicester": "leicester city",
-    "southampton": "southampton",
-    "norwich": "norwich city",
-    "watford": "watford",
     "bournemouth": "afc bournemouth",
-    "cardiff": "cardiff city",
     "fulham": "fulham",
-    "huddersfield": "huddersfield town",
-    "sheffield united": "sheffield united",
     "liverpool": "liverpool",
     "chelsea": "chelsea",
     "arsenal": "arsenal",
     "everton": "everton",
     "burnley": "burnley",
-    "west brom": "west bromwich albion",
 }
+
+# ── Hard system prefix injected into every prompt ───────────────────────────
+SYSTEM_PREFIX = (
+    "### System: You are a football analysis engine. "
+    "You MUST ONLY use the DATA provided. "
+    "Do NOT add any external knowledge, history, or context. "
+    "Do NOT mention teams not in the DATA. "
+    "Do NOT infer anything not explicitly stated. "
+    "If it is not in the DATA, you cannot say it.\n"
+    "Always include:\n"
+    "- Winner\n"
+    "- Scoreline in format X-Y\n"
+    "Be direct and deterministic.\n"
+    """Explain ONLY using the provided numbers.
+Do not mention any teams outside this match.
+Do not add historical or external context."""
+)
+
+# ── Blocked phrases — any sentence containing these is dropped ───────────────
+_BLOCK_PHRASES = [
+    "bet365", "william hill", "betfair", "paddy power", "ladbrokes",
+    "sky bet", "coral", "unibet", "draftkings", "fanduel",
+    "sportsbook", "bookmaker", "bookie", "betting shop", "betting site",
+    "betting platform", "betting exchange", "betting app", "betting odds",
+    "place a bet", "place your bet", "have a bet", "make a bet",
+    "accumulator", "each-way", "each way", "ante-post",
+    "i'm not sure", "i am not sure", "i'm not certain", "i cannot be sure",
+    "i don't have", "i do not have", "i lack", "without more data",
+    "i cannot guarantee", "i can't guarantee", "no guarantees",
+    "for entertainment", "not financial advice", "not a financial",
+    "consult a professional", "disclaimer", "please note that",
+    "it's worth noting", "it is worth noting",
+    "i would recommend checking", "you might want to check",
+    "you should check", "you could check", "check out",
+    "visit ", "browse ", "explore other",
+]
+
+_HEDGE_RE = re.compile(
+    r"\b(I'?m not (sure|certain|able|confident)|"
+    r"I (don'?t|cannot|can'?t) (say|tell|know|confirm|predict)|"
+    r"hard to (say|predict|tell)|"
+    r"difficult to (say|predict|tell)|"
+    r"take (this|it) with|"
+    r"grain of salt|"
+    r"just (a |my )?(opinion|guess|estimate))\b",
+    re.IGNORECASE,
+)
 
 # ── Fuzzy team matching ───────────────────────────────────────────────────────
 def fuzzy_match(phrase, threshold=0.55):
@@ -109,36 +150,45 @@ H2H_WORDS     = ["head to head", "h2h", "history between", "historical record",
 def detect_intent(text):
     t = text.lower()
     teams = extract_teams(t)
-    if any(w in t for w in TEAMS_WORDS):   return "teams"
-    if any(w in t for w in TABLE_WORDS):   return "table"
-    if any(w in t for w in EXPLAIN_WORDS): return "explain"
-    if any(w in t for w in H2H_WORDS) and len(teams) == 2: return "h2h"
-    if any(w in t for w in BTTS_WORDS) and len(teams) == 2: return "btts"
-    if any(w in t for w in FORM_WORDS) and len(teams) <= 1: return "form"
-    if len(teams) >= 2: return "predict"
-    if any(w in t for w in ["predict", "vs", "versus", "against", "win",
-                             "match", "beat", "result", "odds", "chance",
-                             "who will", "who wins", "scoreline"]): return "predict"
+    
+    # 🔥 FORCE table detection first (important)
+    if any(w in t for w in ["table", "standings", "league table", "epl table", "premier league table"]):
+        return "table"
+
+    if any(w in t for w in TEAMS_WORDS):
+        return "teams"
+
+    if any(w in t for w in EXPLAIN_WORDS):
+        return "explain"
+
+    if any(w in t for w in H2H_WORDS) and len(teams) == 2:
+        return "h2h"
+
+    if any(w in t for w in BTTS_WORDS) and len(teams) == 2:
+        return "btts"
+
+    if any(w in t for w in FORM_WORDS) and len(teams) <= 1:
+        return "form"
+
+    if len(teams) >= 2:
+        return "predict"
+
+    if any(w in t for w in ["predict", "vs", "versus", "against", "win", "match"]):
+        return "predict"
+
     return "general"
 
 # ── Data gathering ─────────────────────────────────────────────────────────
 
 def get_prediction_data(home, away):
-    hid = pred.title_to_id.get(home)
-    aid = pred.title_to_id.get(away)
-    if not hid or not aid:
+    result = pred.predict(home, away)
+    if result is None:
         return None
-    feat  = pred.compute_features(hid) + pred.compute_features(aid) + [1/3]*3
-    h_enc = int(pred.team_le.transform([hid])[0])
-    a_enc = int(pred.team_le.transform([aid])[0])
-    with torch.no_grad():
-        lams = pred.model(
-            torch.tensor([h_enc], dtype=torch.long),
-            torch.tensor([a_enc], dtype=torch.long),
-            torch.tensor([feat],  dtype=torch.float32),
-        ).squeeze().tolist()
-    lam_h, lam_a = lams
-    hw, dr, aw = pred.outcome_probs(lam_h, lam_a)
+
+    lam_h = result["lam_h"]
+    lam_a = result["lam_a"]
+    hw, dr, aw = result["probs"]
+
     return lam_h, lam_a, hw, dr, aw
 
 def most_likely_scoreline(lam_h, lam_a, max_g=6):
@@ -206,7 +256,6 @@ def get_table_data():
     return rows
 
 def get_h2h_data(home, away):
-    from collections import defaultdict
     hid = pred.title_to_id.get(home)
     aid = pred.title_to_id.get(away)
     if not hid or not aid:
@@ -233,7 +282,7 @@ def get_h2h_data(home, away):
         "avg_total_goals": avg_hg,
     }
 
-# ── LLM generation ─────────────────────────────────────────────────────────
+# ── Output sanitisation ────────────────────────────────────────────────────
 
 _JUNK_RE = re.compile(
     r"https?://\S+|@\w+|#\w+|\(\s*@\w+\s*\)|pic[,\.]?\s*twitter\S*"
@@ -242,34 +291,62 @@ _JUNK_RE = re.compile(
     re.IGNORECASE,
 )
 
+def _sentence_is_clean(s, allowed_teams=None):
+    """Return False if the sentence should be dropped."""
+    low = s.lower()
+
+    # Block any gambling / hedging phrase
+    if any(p in low for p in _BLOCK_PHRASES):
+        return False
+
+    # Block hedging patterns via regex
+    if _HEDGE_RE.search(s):
+        return False
+
+    # Block sentences that smuggle in non-allowed team names
+    if allowed_teams is not None:
+        for t in TEAMS:
+            if t in low and t not in allowed_teams:
+                return False
+
+    # Drop very short or symbol-heavy sentences
+    if len(s) < 20:
+        return False
+    if re.search(r"[{}\[\]\\|<>]", s):
+        return False
+
+    return True
+
 def clean_output(text, allowed_teams=None):
     text = _JUNK_RE.sub("", text).strip()
     text = re.sub(r" {2,}", " ", text)
     if not text:
         return ""
     sentences = re.split(r"(?<=[.!?])\s+", text)
-    kept = []
-    for s in sentences:
-        s = s.strip()
-        if len(s) < 20:
-            continue
-        if re.search(r"[{}\[\]\\|<>]", s):
-            continue
-        if allowed_teams is not None:
-            if any(t in s.lower() and t not in allowed_teams for t in TEAMS):
-                continue
-        kept.append(s)
-    return " ".join(kept[:3]).strip()
+    kept = [s.strip() for s in sentences if _sentence_is_clean(s.strip(), allowed_teams)]
+    text = " ".join(kept[:2]).strip()
 
-def llm_respond(prompt, max_new_tokens=120, temperature=0.82,
-                top_p=0.91, top_k=50, allowed_teams=None):
+    # hard kill any remaining weird phrasing
+    banned = ["example", "for instance", "such as", "in conclusion"]
+    for b in banned:
+        if b in text.lower():
+            return ""
+
+    return text
+
+# ── LLM generation ─────────────────────────────────────────────────────────
+
+def llm_respond(prompt, max_new_tokens=120, temperature=0.75,
+                top_p=0.90, top_k=50, allowed_teams=None):
     """
     Feed a grounded prompt to the base LLM and return clean output.
-    The prompt already contains all real numbers — the LLM writes
-    the natural language around them.
+    The system prefix steers the model away from gambling / hedging.
+    Lower temperature (0.75 vs 0.82) keeps outputs more decisive.
     """
-    inputs = tokenizer(prompt, return_tensors="pt",
-                       truncation=True, max_length=512).to(device)
+    full_prompt = SYSTEM_PREFIX + prompt
+
+    inputs = tokenizer(full_prompt, return_tensors="pt",
+                       truncation=True, max_length=600).to(device)
     input_len = inputs["input_ids"].shape[1]
 
     with torch.no_grad():
@@ -288,13 +365,13 @@ def llm_respond(prompt, max_new_tokens=120, temperature=0.82,
         )
 
     new_tokens = tokenizer.decode(output[0][input_len:], skip_special_tokens=True)
-    for stop in ["### User:", "### Bot:", "<|endoftext|>", "\n\n"]:
+    for stop in ["### User:", "### Bot:", "### System:", "<|endoftext|>", "\n\n"]:
         if stop in new_tokens:
             new_tokens = new_tokens[:new_tokens.index(stop)]
 
     return clean_output(new_tokens, allowed_teams=allowed_teams)
 
-# ── Prompt builders (data → grounded prompt → LLM) ───────────────────────────
+# ── Prompt builders ───────────────────────────────────────────────────────────
 
 def prediction_prompt(home, away):
     d = get_prediction_data(home, away)
@@ -322,7 +399,6 @@ def prediction_prompt(home, away):
             f"and {ad['gapg']:.1f} conceded per game. Win rate {ad['win_pct']:.0f}%."
         )
 
-    # Streak flavour
     streak_note = ""
     if hd and hd["streak"] >= 3:
         streak_note = f"{H} are on a {hd['streak']}-game winning run."
@@ -332,19 +408,43 @@ def prediction_prompt(home, away):
         streak_note = f"{A} arrive on a {ad['streak']}-match winning streak."
 
     grounding = (
-        f"DATA: {H} vs {A}. "
-        f"Expected goals: {H} {lam_h:.2f}, {A} {lam_a:.2f}. "
-        f"Win probabilities: {H} {hw*100:.1f}%, Draw {dr*100:.1f}%, {A} {aw*100:.1f}%. "
-        f"Most likely scoreline: {scoreline[0]}-{scoreline[1]} ({sl_prob*100:.1f}%). "
-        f"Model leans toward a {best}. "
-        f"{home_context} {away_context} {streak_note}"
-    ).strip()
+        f"DATA:\n"
+        f"{H} vs {A}\n"
+        f"xG: {lam_h:.2f} vs {lam_a:.2f}\n"
+        f"Win probabilities: {hw*100:.1f}% / {dr*100:.1f}% / {aw*100:.1f}%\n"
+        f"Most likely scoreline: {scoreline[0]}-{scoreline[1]}\n"
+        f"Verdict: {best}\n"
+    )
 
+    prompt = (
+        f"### User: Explain this prediction.\n"
+        f"### Bot: {grounding}"
+        f"Explain WHY this result is likely using ONLY this data. "
+        f"Do not mention any teams outside this match. "
+        f"Do not invent history. "
+        f"Do not repeat the numbers. "
+        f"Do not say 'the data shows' or 'the prediction says'. "
+        f"Directly explain the football reasoning.\n"
+    )
+
+    # Prompts open mid-confident-sentence so TinyLlama continues in that register
     templates = [
-        f"### User: Who will win {H} vs {A}?\n### Bot: {grounding} Based on this,",
-        f"### User: Predict {H} against {A}.\n### Bot: {grounding} In summary,",
-        f"### User: {H} vs {A} — give me the full breakdown.\n### Bot: {grounding} Overall,",
-        f"### User: Can {A} get a result at {H}?\n### Bot: {grounding} Looking at this,",
+         f"""### User: Who will win {H} vs {A}?
+        ### Bot: {grounding}
+
+        Final prediction:
+        Winner: {best}
+        Scoreline: {scoreline[0]}-{scoreline[1]}
+
+        Analysis:""",
+         f"""### User: Who will win {H} vs {A}?
+        ### Bot:
+        {grounding}
+
+        Output:
+        Winner: {best}
+        Scoreline: {scoreline[0]}-{scoreline[1]}
+        Reason:"""
     ]
     prompt = random.choice(templates)
     return prompt, [home, away], (lam_h, lam_a, hw, dr, aw, scoreline)
@@ -358,7 +458,7 @@ def form_prompt(team):
             "poor"      if d["win_pct"] < 35 else "mixed"
     streak_note = ""
     if d["streak"] >= 3:
-        streak_note = f"They are currently on a {d['streak']}-game winning streak."
+        streak_note = f"They are on a {d['streak']}-game winning streak."
     elif d["streak"] <= -2:
         streak_note = f"They have lost their last {abs(d['streak'])} matches."
 
@@ -370,10 +470,10 @@ def form_prompt(team):
     ).strip()
 
     templates = [
-        f"### User: How has {T} been playing?\n### Bot: {grounding} To summarise,",
-        f"### User: What's {T}'s form like recently?\n### Bot: {grounding} Overall,",
-        f"### User: Tell me about {T}'s season.\n### Bot: {grounding} In short,",
-        f"### User: Is {T} in good form?\n### Bot: {grounding} Looking at the numbers,",
+        f"### User: How has {T} been playing?\n### Bot: {grounding} {T} are in {trend} form —",
+        f"### User: What's {T}'s form like recently?\n### Bot: {grounding} The data shows {T} with a {d['win_pct']:.0f}% win rate, and",
+        f"### User: Tell me about {T}'s season.\n### Bot: {grounding} {T} have recorded {d['w']} wins from {d['gp']} games, which",
+        f"### User: Is {T} in good form?\n### Bot: {grounding} Looking at {d['form_s']}, {T} are clearly",
     ]
     return random.choice(templates), [team]
 
@@ -391,9 +491,9 @@ def table_prompt():
         f"League leader: {leader['name']} with {leader['pts']} points, GD {leader['gd']:+d}."
     )
     templates = [
-        f"### User: Show me the league table.\n### Bot: {grounding} Here's how it looks:",
-        f"### User: Who's top of the league?\n### Bot: {grounding} In terms of the standings,",
-        f"### User: Give me the current standings.\n### Bot: {grounding} Summarising the table,",
+        f"### User: Show me the league table.\n### Bot: {grounding} {leader['name']} lead the table with {leader['pts']} points, followed by",
+        f"### User: Who's top of the league?\n### Bot: {grounding} {leader['name']} top the table on {leader['pts']} points, and",
+        f"### User: Give me the current standings.\n### Bot: {grounding} The top five reads {top_s}, with",
     ]
     return random.choice(templates)
 
@@ -410,9 +510,9 @@ def explain_prompt():
         f"xG measures shot quality — distance, angle, assist type."
     )
     templates = [
-        f"### User: How does the prediction model work?\n### Bot: {grounding} In plain terms,",
-        f"### User: Explain xG and the Poisson model.\n### Bot: {grounding} To explain this simply,",
-        f"### User: Why do you use expected goals?\n### Bot: {grounding} The reason is,",
+        f"### User: How does the prediction model work?\n### Bot: {grounding} The model generates expected goals (xG) for each side, then",
+        f"### User: Explain xG and the Poisson model.\n### Bot: {grounding} xG quantifies shot quality, and the Poisson network uses it to",
+        f"### User: Why do you use expected goals?\n### Bot: {grounding} xG captures shot quality far better than raw goals, which is why",
     ]
     return random.choice(templates)
 
@@ -420,7 +520,8 @@ def h2h_prompt(home, away):
     d = get_h2h_data(home, away)
     H, A = home.title(), away.title()
     if d is None:
-        grounding = f"DATA: No historical head-to-head data found for {H} vs {A}."
+        grounding = f"DATA: No historical head-to-head data found for {H} vs {A} in this dataset."
+        fallback_opener = f"This fixture has no recorded meetings in the dataset, but"
     else:
         edge = H if d["h_wins"] > d["a_wins"] else (A if d["a_wins"] > d["h_wins"] else "neither side")
         grounding = (
@@ -430,9 +531,10 @@ def h2h_prompt(home, away):
             f"Average total goals per game: {d['avg_total_goals']:.1f}. "
             f"Historical edge: {edge}."
         )
+        fallback_opener = f"Across {d['games']} meetings, {edge} hold the historical edge, and"
     templates = [
-        f"### User: What's the head-to-head record between {H} and {A}?\n### Bot: {grounding} Looking at this,",
-        f"### User: H2H history for {H} vs {A}?\n### Bot: {grounding} In summary,",
+        f"### User: What's the head-to-head record between {H} and {A}?\n### Bot: {grounding} {fallback_opener}",
+        f"### User: H2H history for {H} vs {A}?\n### Bot: {grounding} The record shows",
     ]
     return random.choice(templates), [home, away]
 
@@ -456,103 +558,201 @@ def btts_prompt(home, away):
         f"Combined average: {avg:.0f}%. BTTS verdict: {likely}."
     )
     templates = [
-        f"### User: Will both teams score when {H} play {A}?\n### Bot: {grounding} Based on this,",
-        f"### User: BTTS for {H} vs {A}?\n### Bot: {grounding} Looking at the numbers,",
+        f"### User: Will both teams score when {H} play {A}?\n### Bot: {grounding} With a combined BTTS rate of {avg:.0f}%, this is",
+        f"### User: BTTS for {H} vs {A}?\n### Bot: {grounding} Both-teams-to-score is {likely} here —",
     ]
     return random.choice(templates), [home, away]
 
 def teams_prompt():
     team_list = ", ".join(t.title() for t in sorted(TEAMS))
     grounding = f"DATA: Available EPL clubs in this dataset: {team_list}."
-    return f"### User: Which teams are available?\n### Bot: {grounding} The clubs I cover are"
+    return f"### User: Which teams are available?\n### Bot: {grounding} The clubs covered are"
 
-def general_prompt(user_input):
+# ── Hardcoded fallbacks (used when LLM output is empty after sanitisation) ───
+
+def _fallback_prediction(home, away, stats):
+    lam_h, lam_a, hw, dr, aw, scoreline = stats
+    H, A = home.title(), away.title()
+    outcomes = ["home win", "draw", "away win"]
+    best = outcomes[int(np.argmax([hw, dr, aw]))]
     return (
-        f"### User: {user_input}\n"
-        f"### Bot: DATA: This query does not appear to be about football, EPL teams, matches, predictions, form, table, or methodology. "
-        f"As a specialized football prediction bot, I only provide information on those topics. "
-        f"Politely explain that and suggest asking about football instead."
+        f"{H} {hw*100:.1f}% / Draw {dr*100:.1f}% / {A} {aw*100:.1f}%. "
+        f"Most likely scoreline: {scoreline[0]}-{scoreline[1]}. "
+        f"Model calls a {best}."
+    )
+
+def _fallback_form(team, d):
+    T = team.title()
+    trend = "excellent" if d["win_pct"] >= 65 else ("poor" if d["win_pct"] < 35 else "mixed")
+    return (
+        f"{T} are in {trend} form. Last 5: {d['form_s']}. "
+        f"Season record: {d['w']}W {d['d']}D {d['l']}L, {d['pts']} pts, GD {d['gd']:+d}."
     )
 
 # ── Main chat function ───────────────────────────────────────────────────────
 
+def ensure_scoreline(text, scoreline):
+    if re.search(r"\b\d{1,2}-\d{1,2}\b", text):
+        return text
+
+    # If missing → inject it
+    return text.strip() + f" Predicted scoreline: {scoreline[0]}-{scoreline[1]}."
+
+    # (KEEP EVERYTHING ABOVE EXACTLY THE SAME UNTIL chat())
+
 def chat(user_input):
-    intent = detect_intent(user_input)
-    teams  = extract_teams(user_input.lower())
+        intent = detect_intent(user_input)
+        teams  = extract_teams(user_input.lower())
 
-    if intent == "predict":
-        if len(teams) < 2:
-            prompt = (
-                f"### User: {user_input}\n"
-                f"### Bot: DATA: User asked for a prediction but only named one or no teams. "
-                f"I need two team names to run a prediction. In response,"
+        if intent == "predict":
+            if len(teams) < 2:
+                return "I need two team names to make a prediction."
+
+            output = pred.predict_with_output(teams[0], teams[1])
+
+            if output is None:
+                return "Couldn't find one or both teams."
+
+            formatted, result = output
+            if formatted is None:
+                return "Couldn't find one or both teams."
+
+            # ── MUCH STRONGER EXPLANATION PROMPT ──
+            explanation_prompt = f"""
+    ### User: Explain this match outcome.
+
+    DATA:
+    Home xG: {result['lam_h']:.2f}
+    Away xG: {result['lam_a']:.2f}
+    Home win: {result['probs'][0]*100:.1f}%
+    Draw: {result['probs'][1]*100:.1f}%
+    Away win: {result['probs'][2]*100:.1f}%
+    Prediction: {result['prediction']}
+
+    ### Bot:
+    Explain the result using football reasoning.
+
+    Rules:
+    - Do NOT repeat the numbers
+    - Do NOT say "the data shows" or "the model says"
+    - Do NOT mention probabilities or percentages
+    - Focus on WHY one side is stronger
+    - Talk about attack vs defence using the xG difference
+    - Be confident and direct
+    """
+
+            explanation = llm_respond(
+                explanation_prompt,
+                max_new_tokens=60,     # ↓ shorter = less nonsense
+                temperature=0.4,       # ↓ much more deterministic
+                top_p=0.8,
+                top_k=30,
+                allowed_teams=teams
             )
-            resp = llm_respond(prompt, max_new_tokens=50)
-            return resp or "I need two team names to make a prediction — who's playing who?"
 
-        prompt, allowed, stats = prediction_prompt(teams[0], teams[1])
-        if prompt is None:
-            return llm_respond(
-                f"### User: {user_input}\n### Bot: DATA: One or both teams not found in dataset.",
-                max_new_tokens=40
-            ) or "Couldn't find one or both teams. Type 'teams' to see what's available."
-        resp = llm_respond(prompt, allowed_teams=allowed, max_new_tokens=130)
-        return resp or f"Model projects {teams[0].title()} {stats[2]*100:.1f}% / Draw {stats[3]*100:.1f}% / {teams[1].title()} {stats[4]*100:.1f}%."
+            # fallback explanation (very important)
+            if not explanation:
+                if result['lam_h'] > result['lam_a']:
+                    explanation = "The home side creates better chances and should have the edge in attack."
+                elif result['lam_h'] < result['lam_a']:
+                    explanation = "The away side creates more dangerous chances and are likely to be more clinical."
+                else:
+                    explanation = "Both sides create similar chances, making this a very even matchup."
 
-    if intent == "form":
-        if not teams:
-            prompt = (
-                f"### User: {user_input}\n"
-                f"### Bot: DATA: User asked about form but didn't name a team. In response,"
+            return formatted + "\n\n" + explanation
+
+        # ─────────────────────────────────────────────
+
+        if intent == "form":
+            if not teams:
+                return "Which team's form would you like?"
+            d = get_team_data(teams[0])
+            if d is None:
+                return f"No form data available for {teams[0].title()}."
+            prompt, allowed = form_prompt(teams[0])
+            resp = llm_respond(prompt, allowed_teams=allowed, max_new_tokens=110)
+            return resp or _fallback_form(teams[0], d)
+
+        if intent == "table":
+               
+                
+                rows = get_table_data()
+
+                if not rows:
+                    return "No table data available."
+
+                # column widths (dynamic so it always aligns)
+                pos_w  = len(str(len(rows)))          # width for position (1–20)
+                name_w = max(len(r['name']) for r in rows)
+                pts_w  = max(len(str(r['pts'])) for r in rows)
+                gd_w   = max(len(f"{r['gd']:+d}") for r in rows)
+
+                # header
+                header = (
+                    f"{'':>{pos_w}}  "
+                    f"{'TEAM':<{name_w}} | "
+                    f"{'PTS':>{pts_w}} | "
+                    f"{'GD':>{gd_w}}"
+                )
+
+                lines = [header]
+
+                # rows
+                for i, r in enumerate(rows, start=1):
+                    gd = f"{r['gd']:+d}"
+                    line = (
+                        f"{i:>{pos_w}}. "
+                        f"{r['name']:<{name_w}} | "
+                        f"{r['pts']:>{pts_w}} | "
+                        f"{gd:>{gd_w}}"
+                    )
+                    lines.append(line)
+
+                return "\n" + "\n".join(lines)
+
+        if intent == "explain":
+            prompt = explain_prompt()
+            resp   = llm_respond(prompt, allowed_teams=[], max_new_tokens=130)
+            return resp or (
+                "The model generates expected goals for each team and converts them into match outcome probabilities."
             )
-            resp = llm_respond(prompt, max_new_tokens=40)
-            return resp or "Which team's form would you like?"
-        prompt, allowed = form_prompt(teams[0])
-        if prompt is None:
-            return llm_respond(
-                f"### User: {user_input}\n### Bot: DATA: No form data found for {teams[0].title()}.",
-                max_new_tokens=40
-            ) or f"No form data available for {teams[0].title()}."
-        resp = llm_respond(prompt, allowed_teams=allowed, max_new_tokens=110)
-        return resp or f"No detailed commentary available for {teams[0].title()}."
 
-    if intent == "table":
-        prompt = table_prompt()
-        resp   = llm_respond(prompt, max_new_tokens=130)
-        return resp or "League table data is available — try asking about specific teams."
+        if intent == "h2h":
+            prompt, allowed = h2h_prompt(teams[0], teams[1])
+            resp = llm_respond(prompt, allowed_teams=allowed, max_new_tokens=100)
+            if resp:
+                return resp
+            d = get_h2h_data(teams[0], teams[1])
+            H, A = teams[0].title(), teams[1].title()
+            if d:
+                return (f"{H} vs {A}: {d['games']} meetings — "
+                        f"{H} {d['h_wins']}W / {d['draws']}D / {A} {d['a_wins']}W.")
+            return f"No head-to-head records found for {H} vs {A}."
 
-    if intent == "explain":
-        prompt = explain_prompt()
-        resp   = llm_respond(prompt, allowed_teams=[], max_new_tokens=130)
-        return resp or "I use a Poisson neural network trained on EPL data to predict match outcomes."
+        if intent == "btts":
+            prompt, allowed = btts_prompt(teams[0], teams[1])
+            resp = llm_respond(prompt, allowed_teams=allowed, max_new_tokens=80)
+            if resp:
+                return resp
+            return "BTTS estimate unavailable."
 
-    if intent == "h2h":
-        prompt, allowed = h2h_prompt(teams[0], teams[1])
-        resp = llm_respond(prompt, allowed_teams=allowed, max_new_tokens=100)
-        return resp or "Head-to-head data not available for that pair."
+        if intent == "teams":
+            prompt = teams_prompt()
+            resp   = llm_respond(prompt, max_new_tokens=100)
+            return resp or ", ".join(t.title() for t in sorted(TEAMS))
 
-    if intent == "btts":
-        prompt, allowed = btts_prompt(teams[0], teams[1])
-        resp = llm_respond(prompt, allowed_teams=allowed, max_new_tokens=80)
-        return resp or "BTTS data unavailable for that fixture."
+        # greeting
+        greetings = {"hello", "hi", "hey", "sup", "yo"}
+        if any(g in user_input.lower() for g in greetings):
+            return "Hi — ask me about match predictions, form, or stats."
 
-    if intent == "teams":
-        prompt = teams_prompt()
-        resp   = llm_respond(prompt, max_new_tokens=100)
-        return resp or ", ".join(t.title() for t in sorted(TEAMS))
-
-    # General / off-topic — fixed response to avoid hallucination
-    greetings = ["hello", "hi", "hey", "good morning", "good evening", "sup", "what's up", "yo"]
-    if any(g in user_input.lower() for g in greetings):
-        return "Hi there! I'm a football prediction bot. Ask me about EPL matches, team form, the league table, or how my model works!"
-    else:
-        return "I'm a football prediction bot. Ask me about EPL matches, team form, the league table, or how my model works!"
+        return "Ask me about EPL predictions, form, or stats."
 
 # ── Interactive loop ────────────────────────────────────────────────────────
 
 def run():
     print("=" * 60)
-    print("  EPL Football Chatbot  |  Base TinyLlama · Poisson grounded")
+    print("  EPL Football Chatbot")
     print("  Try: predictions · form · table · h2h · btts · explain")
     print("  Type 'quit' to exit.")
     print("=" * 60)
@@ -563,9 +763,7 @@ def run():
             if not user:
                 continue
             if user.lower() in ("quit", "exit", "bye", "q"):
-                print("Bot: " + (llm_respond(
-                    "### User: Goodbye!\n### Bot:", max_new_tokens=20
-                ) or "Cheers. See you next match day."))
+                print("Bot: See you next match day.")
                 break
             resp = chat(user)
             print(f"\nBot: {resp}\n")

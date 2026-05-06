@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Football Chatbot</title>
+
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        background: #0f172a;
+        color: white;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        margin: 0;
+    }
+
+    .chat-container {
+        width: 420px;
+        height: 600px;
+        background: #1e293b;
+        border-radius: 12px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    .messages {
+        flex: 1;
+        padding: 15px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .bubble {
+        padding: 10px 14px;
+        border-radius: 12px;
+        max-width: 80%;
+        white-space: pre-line;
+        line-height: 1.4;
+    }
+
+    .user {
+        background: #3b82f6;
+        align-self: flex-end; /* RIGHT SIDE */
+        text-align: right;
+    }
+
+    .bot {
+        background: #334155;
+        align-self: flex-start; /* LEFT SIDE */
+    }
+
+    .input-area {
+        display: flex;
+        border-top: 1px solid #334155;
+    }
+
+    input {
+        flex: 1;
+        padding: 12px;
+        border: none;
+        outline: none;
+        background: #0f172a;
+        color: white;
+    }
+
+    button {
+        padding: 12px;
+        border: none;
+        background: #3b82f6;
+        color: white;
+        cursor: pointer;
+    }
+
+    /* typing animation */
+    .typing::after {
+        content: '';
+        animation: dots 1.2s steps(3, end) infinite;
+    }
+
+    @keyframes dots {
+        0% { content: ''; }
+        33% { content: '.'; }
+        66% { content: '..'; }
+        100% { content: '...'; }
+    }
+</style>
+</head>
+
+<body>
+
+<div class="chat-container">
+    <div class="messages" id="messages"></div>
+
+    <div class="input-area">
+        <input id="input" placeholder="Ask about EPL..." />
+        <button onclick="send()">Send</button>
+    </div>
+</div>
+
+<script>
+async function send() {
+    const input = document.getElementById("input");
+    const messages = document.getElementById("messages");
+
+    const text = input.value.trim();
+    if (!text) return;
+
+    // USER bubble (RIGHT)
+    const userBubble = document.createElement("div");
+    userBubble.className = "bubble user";
+    userBubble.innerText = text;
+    messages.appendChild(userBubble);
+
+    input.value = "";
+
+    // BOT typing bubble
+    const typingBubble = document.createElement("div");
+    typingBubble.className = "bubble bot typing";
+    typingBubble.innerText = "Thinking";
+    messages.appendChild(typingBubble);
+
+    messages.scrollTop = messages.scrollHeight;
+
+    try {
+        const res = await fetch("/endpoint/input/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: text })
+        });
+
+        const data = await res.json();
+
+        // remove typing bubble
+        typingBubble.remove();
+
+        // BOT response
+        const botBubble = document.createElement("div");
+        botBubble.className = "bubble bot";
+
+        // CLEAN formatting (fix your divider issue)
+        let cleanText = data.response
+        .replace(/█+/g, "")      // ❌ remove probability bars
+        .replace(/=+/g, "")      // remove equals if any
+        .trim();
+
+        botBubble.innerText = cleanText;
+
+        messages.appendChild(botBubble);
+        messages.scrollTop = messages.scrollHeight;
+
+    } catch (err) {
+        typingBubble.innerText = "Error...";
+    }
+}
+</script>
+
+</body>
+</html>
