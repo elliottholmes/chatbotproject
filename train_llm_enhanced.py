@@ -1,16 +1,15 @@
 """
-train.py — QLoRA fine-tuning of TinyLlama-1.1B-Chat-v1.0
-for the EPL football chatbot.
+Utility script for generating grounding context for the LLM chatbot.
 
-Hardware target: RTX 3070 8 GB VRAM, 32 GB RAM
-Technique:       4-bit NF4 quantisation (bitsandbytes) + LoRA adapters (PEFT)
-Base model:      TinyLlama/TinyLlama-1.1B-Chat-v1.0
-Output:          ./lora_adapters/   (~40-60 MB, commit this folder to Replit)
+This script analyzes EPL match data and generates contextual information
+(predictions, form analysis, H2H records, etc.) that is used to ground
+the LLM responses with real statistics.
 
-Estimated training time: 20-30 mins on RTX 3070
+The base TinyLlama model is NOT fine-tuned. Instead, structured prompts
+containing real data are fed to the base model, which writes natural language
+around the facts.
 
-Install deps first:
-    pip install -r requirements.txt
+Hardware: CPU or GPU (runs fine on both)
 """
 
 import json
@@ -21,53 +20,23 @@ import numpy as np
 import torch
 from collections import defaultdict
 
-# Force CPU-only training to avoid GPU initialization hang
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-torch.cuda.is_available = lambda: False
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    BitsAndBytesConfig,
-    TrainingArguments,
-    Trainer,
-    DataCollatorForLanguageModeling,
-)
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from datasets import Dataset
-
 if __name__ == "__main__":
     
-    # ── Reproducibility ───────────────────────────────────────────────────────────
+    # ── Reproducibility ───────────────────────────────────────────────────────
     random.seed(42)
     np.random.seed(42)
     torch.manual_seed(42)
     
-    # ── Config ────────────────────────────────────────────────────────────────────
+    # ── Config ────────────────────────────────────────────────────────────
     BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-    OUTPUT_DIR = "./lora_adapters"
     DATA_FILE  = "data.json"
     
-    # LoRA — smaller rank suits a 1.1B model
-    LORA_R           = 8
-    LORA_ALPHA       = 16
-    LORA_DROPOUT     = 0.05
-    LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj"]
-    
-    # Training
-    MAX_SEQ_LENGTH = 512
-    TRAIN_STEPS    = 300      # ~20-30 mins on RTX 3070
-    BATCH_SIZE     = 2        # reduced to avoid dataloader hang
-    GRAD_ACCUM     = 2        # effective batch = 4
-    LR             = 3e-4     # slightly higher LR works better for smaller models
-    WARMUP_STEPS   = 30
-    WEIGHT_DECAY   = 0.01
-    
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     # 1. Load match data
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     print("=" * 60)
-    print("  EPL Football Chatbot — QLoRA Training Script")
-    print("  Base model: TinyLlama-1.1B-Chat-v1.0")
+    print("  EPL Football Chatbot — Context Generation")
+    print("  Base model: TinyLlama-1.1B-Chat-v1.0 (NOT fine-tuned)")
     print("=" * 60)
     print()
     print("Loading match data...")
@@ -79,9 +48,9 @@ if __name__ == "__main__":
     matches.sort(key=lambda m: m["datetime"])
     print(f"  Loaded {len(matches)} completed matches\n")
     
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     # 2. Build team statistics
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     print("Building team statistics...")
     
     title_to_id = {}
@@ -168,9 +137,9 @@ if __name__ == "__main__":
     
     print(f"  Teams indexed: {len(id_to_title)}\n")
     
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     # 3. Stat helpers
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     
     def safe_pct(num, den):
         return (num / max(den, 1)) * 100
@@ -246,9 +215,9 @@ if __name__ == "__main__":
         draws = len(games) - h_wins - a_wins
         return {"games": len(games), "h_wins": h_wins, "a_wins": a_wins, "draws": draws}
     
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     # 4. Load predict.py model
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     print("Loading prediction model from predict.py...")
     import predict as pred_mod
     
@@ -272,11 +241,10 @@ if __name__ == "__main__":
         except Exception:
             return None
     
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     # 5. Answer generators
-    #    Short, punchy answers — critical for TinyLlama.
-    #    Every answer is under ~80 words so it fits in 512 tokens with the prompt.
-    # ─────────────────────────────────────────────────────────────────────────────
+    #    Short, punchy answers — TinyLlama works best with focused context.
+    # ───────────────────────────────────────────────────────────────
     
     def prediction_answer(hid, aid):
         result = get_prediction(hid, aid)
@@ -429,9 +397,9 @@ if __name__ == "__main__":
         )
     
     
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     # 6. Build league table
-    # ─────────────────────────────────────────────────────────────────────────────
+    # ───────────────────────────────────────────────────────────────
     table_rows = []
     for tid, s in team_stats.items():
         name = id_to_title.get(tid)
@@ -447,422 +415,14 @@ if __name__ == "__main__":
             })
     table_rows.sort(key=lambda r: (r["pts"], r["gd"]), reverse=True)
     
-    # ─────────────────────────────────────────────────────────────────────────────
-    # 7. TinyLlama ChatML format
-    #
-    #    TinyLlama-Chat uses the ChatML template:
-    #
-    #    <|system|>
-    #    system prompt</s>
-    #    <|user|>
-    #    user message</s>
-    #    <|assistant|>
-    #    assistant reply</s>
-    #
-    #    This must match EXACTLY at inference time in chatbot.py.
-    # ─────────────────────────────────────────────────────────────────────────────
-    
-    SYSTEM = (
-        "You are an EPL football analyst chatbot. "
-        "You give concise, accurate match predictions and team analysis "
-        "using real statistics. You can also handle casual conversation naturally."
-    )
-    
-    def chatml(user_msg, assistant_msg, include_system=False):
-        """Format one training example in TinyLlama ChatML format."""
-        if include_system:
-            return (
-                f"<|system|>\n{SYSTEM}</s>\n"
-                f"<|user|>\n{user_msg}</s>\n"
-                f"<|assistant|>\n{assistant_msg}</s>"
-            )
-        return (
-            f"<|user|>\n{user_msg}</s>\n"
-            f"<|assistant|>\n{assistant_msg}</s>"
-        )
-    
-    # ─────────────────────────────────────────────────────────────────────────────
-    # 8. Question templates
-    # ─────────────────────────────────────────────────────────────────────────────
-    
-    PRED_Q = [
-        "Who will win {h} vs {a}?",
-        "Predict {h} vs {a}.",
-        "Give me a prediction for {h} against {a}.",
-        "Can {h} beat {a}?",
-        "{h} vs {a} — who wins?",
-        "What are the odds for {h} vs {a}?",
-        "Break down {h} vs {a}.",
-        "Will {h} beat {a}?",
-        "What chance does {a} have at {h}?",
-        "Who's favoured: {h} or {a}?",
-    ]
-    
-    FORM_Q = [
-        "How has {t} been playing?",
-        "What's {t}'s form like?",
-        "How is {t} doing this season?",
-        "Is {t} in good form?",
-        "Tell me about {t}'s recent results.",
-        "What's {t}'s record like?",
-        "Are {t} playing well?",
-        "How have {t} been performing?",
-    ]
-    
-    H2H_Q = [
-        "What's the head-to-head between {h} and {a}?",
-        "H2H record: {h} vs {a}?",
-        "Who has the better record, {h} or {a}?",
-        "Historical results between {h} and {a}?",
-    ]
-    
-    BTTS_Q = [
-        "Will both teams score in {h} vs {a}?",
-        "BTTS prediction for {h} vs {a}?",
-        "Is BTTS likely for {h} against {a}?",
-        "Both teams to score: {h} vs {a}?",
-    ]
-    
-    TABLE_Q = [
-        "What's the league table?",
-        "Who's top of the league?",
-        "Show me the standings.",
-        "Current league standings?",
-        "Who's leading the league?",
-        "What does the table look like?",
-    ]
-    
-    EXPLAIN_Q = [
-        "How does your prediction model work?",
-        "What is xG?",
-        "Explain expected goals.",
-        "How do you predict matches?",
-        "What's the Poisson model?",
-        "How do you calculate win probabilities?",
-        "What is expected goals and why does it matter?",
-    ]
-    
-    EXPLAIN_A = [
-        "I use a Poisson neural network trained on EPL data. Each team gets an expected goals value based on their form, xG history, and opponent quality. I then calculate the probability of every possible scoreline to get win/draw/loss odds.",
-        "Expected goals (xG) measures shot quality — distance, angle, assist type. A tap-in might be 0.8 xG; a long-range effort 0.04. Over a season it predicts future results better than raw goals.",
-        "Poisson modelling treats goals as rare random events. Given a team's expected rate (λ), I calculate the probability of scoring 0, 1, 2... goals. Combine both teams and you get the full scoreline matrix.",
-        "Recent form gets exponentially higher weight — last match counts most, older games fade. I also factor in home/away splits, clean sheet rates, and head-to-head history.",
-    ]
-    
-    TEAMS_Q = [
-        "Which teams can you predict?",
-        "What teams are available?",
-        "List all the teams.",
-        "Which clubs do you cover?",
-        "What EPL teams do you know?",
-    ]
-    
-    # ─────────────────────────────────────────────────────────────────────────────
-    # 9. Conversational examples
-    #    Short replies — TinyLlama needs to learn brevity.
-    #    Repeated 5x each so the model sees them often enough to stick.
-    # ─────────────────────────────────────────────────────────────────────────────
-    
-    CONV_PAIRS = [
-        # Greetings
-        ("Hi!", "Hey! Ask me about any EPL fixture or team and I'll give you the stats."),
-        ("Hello!", "Hello! I'm your EPL football analyst. What match do you want to look at?"),
-        ("Hey!", "Hey! Got a fixture you want me to predict?"),
-        ("Hi there!", "Hi! Ask me about predictions, form, or the league table."),
-        ("Good morning!", "Morning! Any EPL fixtures you want previewed today?"),
-        ("Good evening!", "Evening! Want a prediction or some form analysis?"),
-        ("What's up?", "Just crunching EPL stats. What fixture do you want?"),
-        ("How are you?", "Good thanks! Ready to analyse some football. What do you need?"),
-        ("Hey, how's it going?", "Going well! What can I help with — prediction, form, H2H?"),
-    
-        # Farewells
-        ("Bye!", "See you next match day!"),
-        ("Thanks!", "No problem! Let me know if you want anything else."),
-        ("Cheers!", "Cheers! Hope the prediction comes good."),
-        ("Thanks, goodbye!", "No problem — enjoy the football!"),
-        ("That's great, thanks!", "Glad I could help! Ask me anything else you need."),
-        ("Nice one!", "Anytime! Good luck with it."),
-    
-        # What can you do
-        ("What can you do?", "I can predict EPL matches, break down team form, show H2H records, calculate BTTS probability, and show the league table. Just ask about any team or fixture!"),
-        ("What are you?", "I'm an EPL football prediction bot powered by a Poisson neural network and real match data. Ask me anything!"),
-        ("Help", "Try: 'Predict Arsenal vs Chelsea', 'How is Liverpool doing?', 'H2H: Man City vs Man Utd', or 'Show me the table'."),
-    
-        # Off-topic
-        ("What's the weather like?", "No idea about weather! Any fixture you want me to preview instead?"),
-        ("What should I have for dinner?", "Outside my expertise! Want me to find a game worth watching tonight?"),
-        ("Tell me a joke.", "Why did the footballer bring string? In case he tied the score! Now, any predictions you want?"),
-        ("What's the meaning of life?", "Scoring more than the other side, probably. Want a prediction?"),
-        ("Are you human?", "Nope — I'm a football analytics bot. Ask me about any EPL fixture!"),
-        ("Who's the best player?", "I'll leave that to the pundits! Want to know which team has the best form instead?"),
-        ("I'm bored.", "Nothing cures boredom like football stats! Which team do you want to start with?"),
-        ("I'm stressed.", "Sorry to hear that. Want me to find a fixture to look forward to?"),
-        ("What's in the news?", "I don't follow the news, but I know everything about EPL form. What do you want to know?"),
-        ("Can you help me with something else?", "Football is my speciality — predictions, form, stats. What EPL question have you got?"),
-        ("What's your favourite team?", "Strictly neutral — every team gets the same statistical treatment from me!"),
-        ("Do you watch football?", "I can't watch, but I've processed every EPL match in the dataset. Ask me anything!"),
-    
-        # Follow-ups
-        ("And their away form?", "Tell me which team and I'll break down their away record specifically."),
-        ("Is that good?", "Depends on the context — tell me which team or stat and I'll explain."),
-        ("What does that mean?", "Which part — the xG, win probability, or form rating? Happy to explain."),
-        ("Can you explain more?", "Sure — which bit do you want explained?"),
-        ("Who else could win it?", "Give me the two teams and I'll show you the full win/draw/loss breakdown."),
-    ]
-    
-    # ─────────────────────────────────────────────────────────────────────────────
-    # 10. Build training corpus
-    # ─────────────────────────────────────────────────────────────────────────────
-    print("Generating training examples...")
-    examples = []
-    
-    # --- Predictions (~40% of total) ---
-    print("  Generating prediction examples...")
-    pred_count = 0
-    all_pairs  = [(h, a) for h in team_ids for a in team_ids if h != a]
-    random.shuffle(all_pairs)
-    
-    for hid, aid in all_pairs:
-        ans = prediction_answer(hid, aid)
-        if ans is None:
-            continue
-        for _ in range(2):
-            q = random.choice(PRED_Q).format(h=id_to_title[hid], a=id_to_title[aid])
-            examples.append(chatml(q, ans, include_system=random.random() < 0.3))
-            pred_count += 1
-    print(f"    {pred_count} prediction examples")
-    
-    # --- Form (~15%) ---
-    print("  Generating form examples...")
-    form_count = 0
-    for tid in team_ids:
-        ans = form_answer(tid)
-        if ans is None:
-            continue
-        for _ in range(3):
-            q = random.choice(FORM_Q).format(t=id_to_title[tid])
-            examples.append(chatml(q, ans, include_system=random.random() < 0.2))
-            form_count += 1
-    print(f"    {form_count} form examples")
-    
-    # --- H2H (~10%) ---
-    print("  Generating H2H examples...")
-    h2h_count = 0
-    for hid in team_ids:
-        for aid in [t for t in team_ids if t != hid]:
-            data = get_h2h_summary(hid, aid)
-            if data and data["games"] >= 2:
-                ans = h2h_answer(hid, aid)
-                q   = random.choice(H2H_Q).format(h=id_to_title[hid], a=id_to_title[aid])
-                examples.append(chatml(q, ans))
-                h2h_count += 1
-    print(f"    {h2h_count} H2H examples")
-    
-    # --- BTTS (~5%) ---
-    print("  Generating BTTS examples...")
-    btts_count = 0
-    for hid in random.sample(team_ids, min(12, len(team_ids))):
-        for aid in random.sample([t for t in team_ids if t != hid], min(6, len(team_ids)-1)):
-            ans = btts_answer(hid, aid)
-            q   = random.choice(BTTS_Q).format(h=id_to_title[hid], a=id_to_title[aid])
-            examples.append(chatml(q, ans))
-            btts_count += 1
-    print(f"    {btts_count} BTTS examples")
-    
-    # --- Table ---
-    print("  Generating table examples...")
-    t_ans = table_answer(table_rows)
-    for q in TABLE_Q:
-        for _ in range(4):
-            examples.append(chatml(q, t_ans, include_system=True))
-    print(f"    {len(TABLE_Q) * 4} table examples")
-    
-    # --- Explain ---
-    print("  Generating explain examples...")
-    exp_count = 0
-    for q in EXPLAIN_Q:
-        for ans in EXPLAIN_A:
-            examples.append(chatml(q, ans))
-            exp_count += 1
-    print(f"    {exp_count} explain examples")
-    
-    # --- Teams list ---
-    print("  Generating teams list examples...")
-    team_list = ", ".join(sorted(id_to_title[t] for t in team_ids))
-    teams_ans = f"I cover these EPL clubs: {team_list}. Ask me about any of them!"
-    for q in TEAMS_Q:
-        for _ in range(3):
-            examples.append(chatml(q, teams_ans))
-    print(f"    {len(TEAMS_Q) * 3} teams list examples")
-    
-    # --- Conversational (~20%) ---
-    # Repeated 5x — TinyLlama needs more exposure to conversational
-    # patterns or they get drowned out by the football examples
-    print("  Generating conversational examples...")
-    conv_count = 0
-    for q, a in CONV_PAIRS:
-        for _ in range(5):
-            examples.append(chatml(q, a, include_system=random.random() < 0.3))
-            conv_count += 1
-    print(f"    {conv_count} conversational examples")
-    
-    random.shuffle(examples)
-    print(f"\n  Total training examples: {len(examples)}\n")
-    
-    # ─────────────────────────────────────────────────────────────────────────────
-    # 11. Load TinyLlama in 4-bit
-    # ─────────────────────────────────────────────────────────────────────────────
-    print("Loading TinyLlama-1.1B-Chat-v1.0...")
-    print("(Using CPU-only mode)\n")
-    
-    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, use_fast=True)
-    tokenizer.pad_token    = tokenizer.eos_token
-    tokenizer.padding_side = "right"
-    
-    model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL,
-        torch_dtype=torch.float32,
-        device_map=None,
-    ).to("cpu")
-    
-    # ─────────────────────────────────────────────────────────────────────────────
-    # 12. Apply LoRA adapters
-    # ─────────────────────────────────────────────────────────────────────────────
-    print("Applying LoRA adapters (r=8)...")
-    
-    lora_config = LoraConfig(
-        r              = LORA_R,
-        lora_alpha     = LORA_ALPHA,
-        lora_dropout   = LORA_DROPOUT,
-        bias           = "none",
-        task_type      = "CAUSAL_LM",
-        target_modules = LORA_TARGET_MODULES,
-    )
-    
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
-    print()
-    
-    # ─────────────────────────────────────────────────────────────────────────────
-    # 13. Tokenise dataset
-    # ─────────────────────────────────────────────────────────────────────────────
-    print("Tokenising dataset...")
-    
-    def tokenise(example):
-        out = tokenizer(
-            example["text"],
-            truncation     = True,
-            max_length     = MAX_SEQ_LENGTH,
-            padding        = "max_length",
-            return_tensors = "pt",
-        )
-        labels = out["input_ids"].clone()
-        labels[out["attention_mask"] == 0] = -100
-        out["labels"] = labels
-        return {k: v.squeeze(0) for k, v in out.items()}
-    
-    raw_dataset = Dataset.from_dict({"text": examples})
-    tokenised   = raw_dataset.map(
-        tokenise,
-        remove_columns = ["text"],
-        desc           = "Tokenising",
-        num_proc       = 0,
-    )
-    print(f"  Dataset: {len(tokenised)} examples tokenised\n")
-    
-    # ─────────────────────────────────────────────────────────────────────────────
-    # 14. Train
-    # ─────────────────────────────────────────────────────────────────────────────
-    print("Starting QLoRA fine-tuning...")
-    print(f"  Steps:           {TRAIN_STEPS}")
-    print(f"  Effective batch: {BATCH_SIZE * GRAD_ACCUM}")
-    print(f"  Estimated time:  20-30 mins on RTX 3070\n")
-    
-    training_args = TrainingArguments(
-        output_dir                  = OUTPUT_DIR,
-        max_steps                   = TRAIN_STEPS,
-        per_device_train_batch_size = BATCH_SIZE,
-        gradient_accumulation_steps = GRAD_ACCUM,
-        learning_rate               = LR,
-        warmup_steps                = WARMUP_STEPS,
-        weight_decay                = WEIGHT_DECAY,
-        lr_scheduler_type           = "cosine",
-        max_grad_norm               = 1.0,
-        fp16                        = False,
-        optim                       = "adamw_torch",
-        logging_steps               = 20,
-        save_steps                  = 150,
-        save_total_limit            = 2,
-        report_to                   = "none",
-        dataloader_pin_memory       = False,
-        dataloader_num_workers      = 0,
-        remove_unused_columns       = False,
-        #group_by_length             = True,
-    )
-    
-    # Custom training loop to avoid Trainer hang
-    from torch.utils.data import DataLoader
-    
-    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
-    dataloader = DataLoader(
-        tokenised,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        collate_fn=data_collator,
-    )
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
-    model.train()
-    
-    total_loss = 0
-    step = 0
-    
-    print("\nStarting training loop...\n")
-    
-    for epoch in range(10):  # Multiple epochs to reach ~300 steps
-        for batch_idx, batch in enumerate(dataloader):
-            if step >= TRAIN_STEPS:
-                break
-            
-            batch = {k: v.to("cpu") for k, v in batch.items()}
-            
-            outputs = model(**batch)
-            loss = outputs.loss
-            
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad()
-            
-            total_loss += loss.item()
-            step += 1
-            
-            if step % 20 == 0:
-                avg_loss = total_loss / 20
-                print(f"Step {step}/{TRAIN_STEPS}, Loss: {avg_loss:.4f}")
-                total_loss = 0
-        
-        if step >= TRAIN_STEPS:
-            break
-    
-    print(f"\nTraining completed! Final step: {step}")
-    
-    # ─────────────────────────────────────────────────────────────────────────────
-    # 15. Save LoRA adapters
-    # ─────────────────────────────────────────────────────────────────────────────
-    print(f"\nSaving LoRA adapters to {OUTPUT_DIR}/...")
-    model.save_pretrained(OUTPUT_DIR)
-    tokenizer.save_pretrained(OUTPUT_DIR)
-    
-    print()
     print("=" * 60)
-    print("  Training complete!")
-    print(f"  Adapters saved to: {OUTPUT_DIR}/")
-    print(f"  Adapter size:      ~40-60 MB")
-    print(f"  Training examples: {len(examples)}")
-    print(f"  Steps run:         {TRAIN_STEPS}")
+    print("  Context generation complete!")
+    print(f"  Teams: {len(team_ids)}")
+    print(f"  Matches: {len(matches)}")
     print()
-    print("  Next steps:")
-    print("  1. Commit ./lora_adapters/ to your Replit project")
-    print("  2. Run chatbot.py")
+    print("  This script has generated statistics for grounding prompts.")
+    print("  The base TinyLlama model is NOT fine-tuned.")
+    print("  Instead, real data is injected into prompts to guide responses.")
+    print()
+    print("  Run: python main.py")
     print("=" * 60)
