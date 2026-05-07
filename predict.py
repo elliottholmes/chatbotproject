@@ -146,6 +146,7 @@ def predict(home, away):
         "prediction": OUTCOME[int(np.argmax(probs))]
     }
 
+
 def predict_with_output(home, away):
     result = predict(home, away)
 
